@@ -4,6 +4,7 @@ __pycache__/
 .env
 *.db
 *.pt
+!model/potholevision_best.pt
 bus.jpg
 output.jpg
 runs/
