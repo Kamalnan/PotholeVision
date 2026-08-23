@@ -1,6 +1,6 @@
 # PotholeVision
 
-A cross-platform pothole detection and monitoring system built with YOLOv8. Upload a road image or use a live webcam feed to detect potholes in real time, log each detection with GPS location (when available), and view all detected potholes on an interactive map — all from a single, self-contained application.
+A cross-platform pothole detection and monitoring system built with YOLOv8. Detect potholes from an uploaded image or a live webcam feed, log each detection with GPS location, and view every detected pothole on an interactive map — all from a single, self-contained application.
 
 This is a final year engineering project, rebuilt from scratch to replace an earlier, undocumented, Linux-only implementation with a properly engineered, cross-platform, documented system.
 
@@ -8,11 +8,13 @@ This is a final year engineering project, rebuilt from scratch to replace an ear
 
 ## Features
 
-- **Pothole detection** on uploaded images using a custom-trained YOLOv8 model
+- **Pothole detection on uploaded images**, using a custom-trained YOLOv8 model
 - **Live webcam detection**, optimized for real-time performance on CPU-only hardware
-- **GPS extraction** from image EXIF metadata, when available
-- **Persistent logging** of detections to a local SQLite database, with proximity-based deduplication (the same pothole seen again isn't logged as a new entry — it increments a "times detected" counter instead)
-- **Interactive map view** (Folium) plotting all GPS-tagged detections
+- **GPS tagging from two sources**:
+  - Image EXIF metadata, for uploaded photos that have it
+  - The browser's own location (via the Geolocation API), for live webcam detections
+- **Persistent logging** to a local SQLite database, with proximity-based deduplication — the same pothole detected again isn't logged as a new entry, it increments a "times detected" counter instead
+- **Interactive map**, generated on demand and rendered directly inside the app, showing every GPS-tagged detection with a pin and popup (confidence, times seen, last seen)
 - **Fully cross-platform**: runs identically on Windows, macOS, and Linux — no OS-specific dependencies
 
 ---
@@ -29,6 +31,7 @@ The original version of this project (a typical downloaded, undocumented pothole
 | Commit history | 1 commit (zip dump) | Real, incremental commit history |
 | Documentation | None | This README, with honest results and limitations |
 | Evaluation | No metrics reported | Precision, recall, mAP reported and discussed |
+| Location tracking | None | GPS logging + interactive map |
 
 ---
 
@@ -37,12 +40,13 @@ The original version of this project (a typical downloaded, undocumented pothole
 | Component | Choice | Why |
 |---|---|---|
 | Detection model | YOLOv8n (Ultralytics) | Best balance of speed and accuracy for a single-object-class problem; large, active community and pretrained weights available for transfer learning |
-| Language | Python | Native ecosystem for PyTorch, OpenCV, and Ultralytics — no translation layer needed |
-| App framework | Streamlit | Single-file, self-contained UI + logic — no separate frontend/backend to deploy or run |
-| Database | SQLite | File-based, zero server setup, appropriate for the data scale of a monitoring tool like this — not a distributed, multi-user system |
-| Map | Folium (Leaflet.js under the hood) | Lightweight, Python-native, embeds directly into Streamlit |
-| GPS extraction | `exifread` | Reads GPS coordinates embedded in photo EXIF metadata |
-| Fast inference | ONNX Runtime | Exporting the trained model to ONNX and running at a reduced input resolution meaningfully improves CPU inference speed for live webcam use |
+| Fast inference | ONNX Runtime, 416x416 export | Meaningfully faster CPU inference than the default PyTorch/640px setup, needed for usable live webcam detection on CPU-only hardware |
+| Language | Python | Native ecosystem for PyTorch, OpenCV, and Ultralytics -- no translation layer needed |
+| App framework | Streamlit | Single-file, self-contained UI + logic -- no separate frontend/backend to deploy or run |
+| Database | SQLite | File-based, zero server setup, appropriate for the data scale of a monitoring tool like this -- not a distributed, multi-user system |
+| Map | Folium (Leaflet.js under the hood), rendered inline via `streamlit.components.v1` | Rich, pin-and-popup maps; rendering the saved HTML inline avoids browser restrictions on scripts opening local `file://` links |
+| GPS (photos) | `exifread` | Reads GPS coordinates embedded in photo EXIF metadata |
+| GPS (webcam) | `streamlit-js-eval` (browser Geolocation API) | Live camera frames carry no EXIF data, so location for webcam mode comes from the browser's own location permission instead |
 
 ---
 
@@ -71,12 +75,23 @@ The jump between the two runs reflects both the additional epochs and the fuller
 
 ## Real-time performance
 
-Live webcam detection runs entirely on-device (CPU), with two optimizations applied to keep it usable:
+Live webcam detection runs entirely on-device (CPU), with optimizations applied to keep it usable:
 
-1. **Reduced inference resolution** (416×416 instead of the default 640×640)
-2. **Frame skipping** — full detection runs every 3rd frame; intermediate frames reuse the last detection result, keeping the video feed visually continuous without re-running the model on every frame
+1. **ONNX export at reduced resolution** (416x416 instead of the default 640x640)
+2. **Frame skipping** -- full detection runs every 3rd frame; intermediate frames reuse the last detection result, keeping the video feed visually continuous without re-running the model on every frame
 
 On the test hardware (Intel Core i5-13500H, no dedicated GPU), this produces noticeably smoother real-time detection than an unoptimized pipeline, though it does not reach the 30 FPS typically expected of GPU-accelerated systems.
+
+---
+
+## How the map works
+
+1. Detections are logged to SQLite as they happen -- from EXIF GPS (image uploads) or browser GPS (webcam mode)
+2. Clicking **"Generate Pothole Map"** builds a Folium map from every GPS-tagged detection in the database and saves it as `pothole_map.html`
+3. The map is then read back and rendered **inline inside the app** (via `streamlit.components.v1.html`), rather than opened as a separate browser tab -- this avoids a real browser security restriction that blocks scripts from navigating to local `file://` links from a page served over `http://`
+4. Data persists across sessions, since it's stored in a real database file (`database/detections.db`), not in memory -- closing and reopening the app does not lose previously logged detections
+
+**Known limitation**: because the webcam loop runs continuously inside a single script execution, Streamlit cannot process other UI interactions (like the map button) while it's active. Stop the webcam (uncheck "Start webcam") before generating the map.
 
 ---
 
@@ -84,8 +99,8 @@ On the test hardware (Intel Core i5-13500H, no dedicated GPU), this produces not
 
 Documenting these honestly rather than glossing over them:
 
-- **Not validated at highway speeds.** At 40–60 km/h, the combination of camera frame rate, CPU inference speed, and motion blur means potholes can be missed between processed frames. The system is reliable at walking pace or slow driving speeds; highway-speed reliability would require dedicated hardware (e.g. an NVIDIA Jetson) and is out of scope for this project.
-- **GPS accuracy depends entirely on the source image's EXIF data.** Many images (including most of this project's own training/validation set) have no embedded GPS data at all — the app handles this gracefully but cannot invent location data that isn't present.
+- **Not validated at highway speeds.** At 40-60 km/h, the combination of camera frame rate, CPU inference speed, and motion blur means potholes can be missed between processed frames. The system is reliable at walking pace or slow driving speeds; highway-speed reliability would require dedicated hardware (e.g. an NVIDIA Jetson) and is out of scope for this project.
+- **Map interaction is only available when the webcam loop isn't running**, for the reason described above.
 - **This is a detection and logging tool, not an official reporting system.** It does not submit reports to any government or municipal body. Detected data (and the map/export views) are intended to support a human decision to report an issue through proper channels, not to replace that process.
 - **Single class only.** The model detects potholes as one category; it does not distinguish severity (e.g. small vs. large) or other road defects.
 
@@ -104,7 +119,8 @@ PotholeVision/
 ├── database/
 │   └── db.py                # SQLite schema, logging, and proximity dedup logic
 ├── utils/
-│   └── gps_extract.py       # EXIF GPS extraction helper
+│   ├── gps_extract.py       # EXIF GPS extraction helper (image uploads)
+│   └── map_view.py          # Folium map generation helper
 ├── data/
 │   └── pothole-dataset/     # Training dataset (train/valid/test + data.yaml)
 ├── requirements.txt
@@ -132,6 +148,7 @@ PotholeVision/
    ```
    streamlit run app.py
    ```
+5. In the app: choose **Image Upload** to test on a photo, or **Webcam (Live)** for real-time detection (grant camera and location permissions when prompted). Click **Generate Pothole Map** any time to view all logged detections.
 
 ---
 
@@ -141,3 +158,4 @@ PotholeVision/
 - Batch video processing mode (record now, analyze later) for full-coverage road surveys at higher driving speeds
 - Exportable reports (PDF/CSV) of logged detections for manual submission to relevant authorities
 - Support for dedicated edge hardware for genuine highway-speed deployment
+- Refactor webcam detection to avoid blocking other UI interactions while running
