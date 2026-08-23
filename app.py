@@ -1,12 +1,14 @@
 import streamlit as st
 from ultralytics import YOLO
 from PIL import Image
-import folium
-from streamlit_folium import st_folium
 import cv2
 import numpy as np
+import os
+import streamlit.components.v1 as components
+from streamlit_js_eval import get_geolocation
 
 from utils.gps_extract import extract_gps
+from utils.map_view import generate_map
 from database.db import init_db, log_detection, get_all_detections
 
 init_db()
@@ -53,6 +55,16 @@ if mode == "Image Upload":
 # ---------------- WEBCAM (LIVE) MODE ----------------
 elif mode == "Webcam (Live)":
     st.write("Live webcam pothole detection. Click 'Start' below.")
+
+    location = get_geolocation()
+    if location:
+        webcam_lat = location['coords']['latitude']
+        webcam_lon = location['coords']['longitude']
+        st.write(f"📍 Using browser location: {webcam_lat:.6f}, {webcam_lon:.6f}")
+    else:
+        webcam_lat, webcam_lon = None, None
+        st.write("📍 Location not available (permission denied or unsupported).")
+
     run = st.checkbox("Start webcam")
     frame_placeholder = st.empty()
     detection_count_placeholder = st.empty()
@@ -60,7 +72,7 @@ elif mode == "Webcam (Live)":
     if run:
         cap = cv2.VideoCapture(0)
         frame_count = 0
-        detect_every_n_frames = 3  # run full detection every 3rd frame
+        detect_every_n_frames = 3
         last_results = None
 
         while run:
@@ -71,10 +83,14 @@ elif mode == "Webcam (Live)":
 
             frame_count += 1
 
-            # Only run the (expensive) detection every Nth frame
             if frame_count % detect_every_n_frames == 0 or last_results is None:
                 results = model(frame, verbose=False)
                 last_results = results
+
+                if webcam_lat is not None and len(results[0].boxes) > 0:
+                    for box in results[0].boxes:
+                        confidence = float(box.conf[0])
+                        log_detection(webcam_lat, webcam_lon, confidence, "webcam_frame")
 
             annotated_frame = last_results[0].plot()
             annotated_frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
@@ -87,24 +103,16 @@ elif mode == "Webcam (Live)":
 
         cap.release()
 
-# ---------------- MAP SECTION (always shown) ----------------
-st.subheader("Pothole Map")
-all_detections = get_all_detections()
-geo_detections = [d for d in all_detections if d[2] is not None]
-
-if geo_detections:
-    avg_lat = sum(d[2] for d in geo_detections) / len(geo_detections)
-    avg_lon = sum(d[3] for d in geo_detections) / len(geo_detections)
-    m = folium.Map(location=[avg_lat, avg_lon], zoom_start=15)
-
-    for d in geo_detections:
-        _, timestamp, lat_, lon_, conf, path, times = d
-        folium.Marker(
-            location=[lat_, lon_],
-            popup=f"Confidence: {conf:.2f}<br>Seen {times}x<br>Last: {timestamp}",
-            icon=folium.Icon(color='red', icon='exclamation-triangle', prefix='fa')
-        ).add_to(m)
-
-    st_folium(m, width=700, height=450)
-else:
-    st.info("No GPS-tagged detections logged yet.")
+# ---------------- MAP GENERATION (always available) ----------------
+st.divider()
+if st.button("🗺️ Generate Pothole Map"):
+    all_detections = get_all_detections()
+    geo_detections = [d for d in all_detections if d[2] is not None]
+    map_path = generate_map(geo_detections)
+    if map_path:
+        st.success("Map generated below:")
+        with open(map_path, 'r', encoding='utf-8') as f:
+            map_html = f.read()
+        components.html(map_html, height=500)
+    else:
+        st.info("No GPS-tagged detections yet.") 
