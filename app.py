@@ -10,7 +10,7 @@ from utils.gps_extract import extract_gps
 from database.db import init_db, log_detection, get_all_detections
 
 init_db()
-model = YOLO('model/potholevision_best.pt')
+model = YOLO('model/potholevision_best.onnx')
 
 st.title("PotholeVision")
 
@@ -58,24 +58,31 @@ elif mode == "Webcam (Live)":
     detection_count_placeholder = st.empty()
 
     if run:
-        cap = cv2.VideoCapture(0)  # 0 = default webcam
+        cap = cv2.VideoCapture(0)
+        frame_count = 0
+        detect_every_n_frames = 3  # run full detection every 3rd frame
+        last_results = None
+
         while run:
             ret, frame = cap.read()
             if not ret:
                 st.error("Could not access webcam.")
                 break
 
-            results = model(frame, verbose=False)
-            annotated_frame = results[0].plot()
+            frame_count += 1
 
-            # Convert BGR (OpenCV) to RGB (Streamlit expects RGB for st.image by default here)
+            # Only run the (expensive) detection every Nth frame
+            if frame_count % detect_every_n_frames == 0 or last_results is None:
+                results = model(frame, verbose=False)
+                last_results = results
+
+            annotated_frame = last_results[0].plot()
             annotated_frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
             frame_placeholder.image(annotated_frame_rgb, use_container_width=True)
 
-            num_detections = len(results[0].boxes)
+            num_detections = len(last_results[0].boxes)
             detection_count_placeholder.write(f"**Potholes detected in frame: {num_detections}**")
 
-            # Re-check the checkbox state each loop so "Stop" actually works
             run = st.session_state.get("Start webcam", run)
 
         cap.release()
